@@ -30,7 +30,7 @@ chmod +x make_author_list.sh
 
 Each line = one author.
 
-Fields are separated by semicolons (;).
+Fields are separated by semicolons (;), commas (,), or tabs (\t).
 
 First field = author's full name.
 
@@ -55,7 +55,7 @@ Andrea Ganna; FIMM; BROAD; MGH
 
 Each line = one affiliation.
 
-Two fields, separated by a semicolon (;):
+Two fields, separated by a semicolons (;), commas (,) or tabs (\t):
 
 Full affiliation text
 
@@ -76,7 +76,7 @@ Department of Public Health, University of Helsinki, Helsinki, Finland.; HELSINK
 Using the bundled example files:
 
 ```bash
-./make_author_list.sh authors.txt affiliations.txt
+./make_author_list.sh authors.txt affiliations.txt ;
 ```
 
 The script will output:

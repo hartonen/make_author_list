@@ -1,125 +1,134 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "Usage: $0 <authors_file> <affiliations_file>" >&2
+# Usage: ./script.sh <authors_file> <affiliations_file> [delimiter]
+# Defaults to ';'. Use "\t" for tab. If delimiter is ',' -> quoted CSV supported.
+
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo "Usage: $0 <authors_file> <affiliations_file> [delimiter]" >&2
   exit 1
 fi
 
 AUTHORS_FILE="$1"
 AFFILS_FILE="$2"
+DELIM="${3:-;}"
 
-awk -v AUTH="$AUTHORS_FILE" -v AFF="$AFFILS_FILE" '
+# Normalize "\t" to real tab
+if [[ "$DELIM" == '\t' ]]; then
+  DELIM=$'\t'
+fi
+if [[ ${#DELIM} -gt 1 ]]; then
+  echo "Warning: delimiter must be a single character. Using first character: '${DELIM:0:1}'" >&2
+  DELIM="${DELIM:0:1}"
+fi
+
+awk -v AUTH="$AUTHORS_FILE" -v AFF="$AFFILS_FILE" -v DELIM="$DELIM" '
 function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
-
-BEGIN {
-  # --- Load affiliations: map key -> full text ---
-  while ((getline line < AFF) > 0) {
-    if (line ~ /^[[:space:]]*$/) continue
-    n = split(line, parts, /;/)
-    if (n < 2) {
-      # Skip malformed line quietly
-      continue
-    }
-    # Expect exactly 2 columns: text ; key
-    text = trim(parts[1])
-    key  = trim(parts[2])
-    if (key != "") {
-      key2text[key] = text
-    }
+function dequote(s,   t) {
+  if (s ~ /^".*"$/) {
+    t = substr(s, 2, length(s)-2)
+    gsub(/""/, "\"", t)
+    return t
   }
-  close(AFF)
-
-  # Counters
-  total_authors = 0
-  next_num = 0
+  return s
 }
 
-# --- Process authors file line-by-line ---
-{
-  line = $0
-  if (line ~ /^[[:space:]]*$/) next
+# fsplit: split line s into array out, honoring quotes if DELIM==","
+function fsplit(s, out,   i,c,len,field,quoted,n,nextc) {
+  delete out
+  if (DELIM != ",") {
+    n = split(s, out, (DELIM == "|") ? "\\|" : DELIM)
+    for (i=1; i<=n; i++) out[i] = trim(out[i])
+    return n
+  }
 
-  nf = split(line, f, /;/)
-  name = trim(f[1])
-  if (name == "") next
-
-  # Collect this author’s affiliation numbers (in row order)
-  delete nums
-  num_count = 0
-
-  # Track duplicates per author row just in case
-  delete seen_key
-
-  for (i = 2; i <= nf; i++) {
-    key = trim(f[i])
-    if (key == "" || key in seen_key) continue
-    seen_key[key] = 1
-
-    # Assign number if first time seen globally
-    if (!(key in key2num)) {
-      next_num++
-      key2num[key] = next_num
-
-      # Remember text by number for output order
-      if (key in key2text) {
-        num2text[next_num] = key2text[key]
+  # Simple CSV parser for comma delimiter
+  len = length(s); field=""; quoted=0; n=0
+  for (i=1; i<=len; i++) {
+    c = substr(s,i,1)
+    if (quoted) {
+      if (c=="\"") {
+        nextc = (i<len) ? substr(s,i+1,1) : ""
+        if (nextc=="\"") { field=field "\""; i++ }
+        else { quoted=0 }
       } else {
-        # Missing mapping – keep placeholder and warn to stderr
-        num2text[next_num] = "[MISSING AFFILIATION FOR KEY: " key "]"
-        printf("Warning: no affiliation text found for key \"%s\".\n", key) > "/dev/stderr"
+        field=field c
+      }
+    } else {
+      if (c=="\"") {
+        quoted=1
+      } else if (c==",") {
+        n++; out[n]=trim(field); field=""
+      } else {
+        field=field c
       }
     }
+  }
+  n++; out[n]=trim(field)
+  for (i=1; i<=n; i++) out[i]=dequote(out[i])
+  return n
+}
 
-    # Record the number for this author in the order encountered
-    num_count++
-    nums[num_count] = key2num[key]
+BEGIN {
+  total_authors = 0
+  next_num = 0
+
+  # --- Load affiliations ---
+  while ((getline line < AFF) > 0) {
+    if (line ~ /^[[:space:]]*$/) continue
+    n = fsplit(line, parts)
+    if (n < 2) continue
+    text = parts[1]
+    key  = parts[2]
+    if (key != "") key2text[key] = text
+  }
+  close(AFF)
+}
+
+{
+  if ($0 ~ /^[[:space:]]*$/) next
+  nf = fsplit($0, f)
+  name = f[1]
+  if (name=="") next
+
+  delete nums; num_count=0; delete seen_key
+  for (i=2; i<=nf; i++) {
+    key = f[i]
+    if (key=="" || key in seen_key) continue
+    seen_key[key]=1
+
+    if (!(key in key2num)) {
+      next_num++; key2num[key]=next_num
+      if (key in key2text) num2text[next_num]=key2text[key]
+      else {
+        num2text[next_num] = "[MISSING AFFILIATION FOR KEY: " key "]"
+        printf("Warning: no affiliation text for key \"%s\".\n", key) > "/dev/stderr"
+      }
+    }
+    num_count++; nums[num_count]=key2num[key]
   }
 
-  # Build author token: Name + numbers (comma-separated, no spaces)
   token = name
-  if (num_count > 0) {
-    token = token
+  if (num_count>0) {
     token = token nums[1]
-    for (j = 2; j <= num_count; j++) token = token "," nums[j]
+    for (j=2; j<=num_count; j++) token = token "," nums[j]
   }
-
-  total_authors++
-  authors[total_authors] = token
+  total_authors++; authors[total_authors]=token
 }
 
 END {
-  # --- Print authors line with commas and & before the last author ---
-  if (total_authors == 1) {
-    print authors[1]
-  } else if (total_authors == 2) {
-    print authors[1] " & " authors[2]
-  } else if (total_authors > 2) {
-    for (i = 1; i <= total_authors; i++) {
-      if (i == total_authors) {
-        # Last: preceded by &
-        printf(" & %s", authors[i])
-      } else if (i == 1) {
-        # First: print without leading comma
-        printf("%s", authors[i])
-      } else {
-        # Middle authors: comma+space
-        printf(", %s", authors[i])
-      }
+  if (total_authors==1) print authors[1]
+  else if (total_authors==2) print authors[1] " & " authors[2]
+  else if (total_authors>2) {
+    for (i=1;i<=total_authors;i++) {
+      if (i==total_authors) printf(" & %s", authors[i])
+      else if (i==1) printf("%s", authors[i])
+      else printf(", %s", authors[i])
     }
     printf("\n")
-  } else {
-    # No authors found
-    exit
   }
 
-  # Blank line
   print ""
-
-  # --- Print numbered affiliation list in encounter order ---
-  for (k = 1; k <= next_num; k++) {
-    if (k in num2text)
-      printf("%d) %s\n", k, num2text[k])
-  }
+  for (k=1;k<=next_num;k++) if (k in num2text) printf("%d) %s\n", k, num2text[k])
 }
 ' "$AUTHORS_FILE"
